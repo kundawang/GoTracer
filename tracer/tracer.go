@@ -41,18 +41,26 @@ func GoTrace(
 
 	processingGroupData := make([][][2]int, renderRoutines)
 	for i := range processingGroupData {
-		processingGroupData[i] = make([][2]int, 2)
+		// Start empty: a preallocated capacity would leave zero-valued
+		// [2]int{0,0} entries that re-render pixel (0,0) once per goroutine
+		// and corrupt the pixel stream sent to distributed agents.
+		processingGroupData[i] = make([][2]int, 0)
 	}
 
 	imin, imax, jmin, jmax := env.Image.GetPatch()
 
 	var output *TracerOutput
 	if !sharePixelProgress {
+		// Size the array to the patch itself, not the global image bounds:
+		// a patch starting at non-zero imin/jmin would otherwise store its
+		// rows and columns at the wrong local indices and leave leading gaps.
+		rows := imax - imin
+		cols := jmax - jmin
 		output = &TracerOutput{
-			Pixels: make([][]*models.Pixel, imax),
+			Pixels: make([][]*models.Pixel, rows),
 		}
 		for i := range output.Pixels {
-			output.Pixels[i] = make([]*models.Pixel, jmax)
+			output.Pixels[i] = make([]*models.Pixel, cols)
 		}
 	}
 
@@ -82,24 +90,36 @@ func GoTrace(
 	var renderWg sync.WaitGroup
 	renderWg.Add(renderRoutines)
 	for _, _data := range processingGroupData {
-		go func(samples int, scene *models.Scene, data [][2]int) {
+		go func(samples int, scene *models.Scene, data [][2]int, seed *int64) {
 
 			defer func() {
 				renderWg.Done()
 			}()
 
-			rng := rand.New(rand.NewSource(time.Now().Unix() + rand.Int63()))
+			var rng *rand.Rand
+			if seed == nil {
+				rng = rand.New(rand.NewSource(time.Now().Unix() + rand.Int63()))
+			}
 
 			for _, point := range data {
 				i, j := point[0], point[1]
-				pixel := processPixel(i, j, width, height, samples, scene, rng)
+				pixelRng := rng
+				if seed != nil {
+					// One independent stream per pixel coordinate: identical
+					// specs and patches always reproduce the same pixel, on a
+					// local render or on any agent.
+					pixelRng = rand.New(rand.NewSource(pixelSeed(*seed, i, j)))
+				}
+				pixel := processPixel(i, j, width, height, samples, scene, pixelRng)
 				if sharePixelProgress {
 					progress <- pixel
 				} else {
-					output.Pixels[i][j] = pixel
+					// Store at patch-local indices; the Pixel itself keeps its
+					// global image coordinates for the final PNG placement.
+					output.Pixels[i-imin][j-jmin] = pixel
 				}
 			}
-		}(env.Image.Samples, scene, _data)
+		}(env.Image.Samples, scene, _data, env.Settings.Seed)
 	}
 
 	renderWg.Wait()
@@ -144,4 +164,17 @@ func getColor(r *models.Ray, scene *models.Scene, renderDepth int, rng *rand.Ran
 	}
 
 	return scene.AmbientLight
+}
+
+// pixelSeed derives a deterministic RNG seed for one pixel from the scene seed
+// and its coordinates. The splitmix64-style finalizer spreads neighbouring
+// coordinates into uncorrelated streams and only depends on integer math, so
+// the same pixel is reproduced bit-for-bit on every machine.
+func pixelSeed(sceneSeed int64, i, j int) int64 {
+	z := uint64(sceneSeed) ^ uint64(uint32(i))*0x9e3779b97f4a7c15 ^
+		uint64(uint32(j))*0xc2b2ae3d27d4eb4f
+	z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+	z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+	z = z ^ (z >> 31)
+	return int64(z)
 }

@@ -78,9 +78,6 @@ func (a *Agent) Initialize() {
 		return
 	}
 
-	var message messages.WebSocketMessage
-	var pixelMessage messages.PixelResultMessage
-
 	for {
 		_, rawMsg, err := a.Conn.ReadMessage()
 		if err != nil {
@@ -88,14 +85,23 @@ func (a *Agent) Initialize() {
 			return
 		}
 
-		json.Unmarshal(rawMsg, &message)
+		// Fresh structs per frame: WebSocketMessage.Data is an interface{}, so
+		// reusing one across frames would retain the previous frame's pixel
+		// when a terminal message without a Data field arrives.
+		var message messages.WebSocketMessage
+		if uerr := json.Unmarshal(rawMsg, &message); uerr != nil {
+			fmt.Printf("Unable to parse message from agent %s: %s\n", a.URL, uerr)
+			continue
+		}
 
-		messageType := message.Type
-		switch messageType {
+		switch message.Type {
 		case messages.PixelResult:
-			json.Unmarshal(rawMsg, &pixelMessage)
-			pixel := pixelMessage.Data
-			a.ResultChannel <- pixel
+			var pixelMessage messages.PixelResultMessage
+			if uerr := json.Unmarshal(rawMsg, &pixelMessage); uerr != nil {
+				fmt.Printf("Unable to parse pixel from agent %s: %s\n", a.URL, uerr)
+				continue
+			}
+			a.ResultChannel <- pixelMessage.Data
 		case messages.RenderingCompleted:
 			workDone = true
 			return
@@ -132,6 +138,9 @@ func main() {
 
 	myClient := &http.Client{
 		Timeout: time.Second * 60,
+		// Agents are loopback/intranet nodes reached directly; a sandbox or
+		// corporate HTTP proxy cannot service their /status endpoint.
+		Transport: &http.Transport{Proxy: nil},
 	}
 
 	var agentStatus messages.AgentStatus
@@ -158,7 +167,10 @@ func main() {
 			continue
 		}
 
-		var dialer *websocket.Dialer
+		// Dial agents directly: a corporate HTTP proxy cannot carry the
+		// websocket connection to a loopback/intranet agent, so never route
+		// agent traffic through ProxyFromEnvironment.
+		dialer := &websocket.Dialer{Proxy: nil}
 
 		conn, _, err := dialer.Dial(wsURL, nil)
 		if err != nil {
@@ -192,7 +204,10 @@ func main() {
 		linesToAgent := linesPerCore * cores
 		agentEnv := models.Specification(env)
 
-		maxWidth = minWidth + linesToAgent + 1
+		// Column patches must be contiguous and non-overlapping: assigning
+		// [minWidth, minWidth+linesToAgent) makes the union of agent patches
+		// exactly [0, Width) with no duplicated or unrendered columns.
+		maxWidth = minWidth + linesToAgent
 		if maxWidth > env.Image.Width {
 			maxWidth = env.Image.Width
 		}
@@ -228,7 +243,19 @@ func main() {
 				agentsToWaitFor -= 1
 				log.Printf("Agent '%s' finished. Status: %t", agent.URL, agent.WorkDone)
 				if agentsToWaitFor == 0 {
-					return
+					// Drain pixels still buffered in the channel: the last
+					// completion signal can arrive before every queued pixel
+					// has been drawn, and returning now would leave holes.
+					for {
+						select {
+						case px := <-renderedChannel:
+							progressBar.Increment()
+							c := color.RGBA{px.Color[0], px.Color[1], px.Color[2], 255}
+							pngImage.Set(px.I, px.J, c)
+						default:
+							return
+						}
+					}
 				}
 			}
 		}

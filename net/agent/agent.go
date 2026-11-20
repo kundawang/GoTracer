@@ -33,6 +33,17 @@ type RenderingClient struct {
 	OperationId         string
 	PongChannel         chan bool
 	WaitGroup           sync.WaitGroup
+	// writeMutex serialises every frame written to Conn: the ping goroutine
+	// and the result sender otherwise interleave writes on one websocket and
+	// corrupt random frames, producing black pixels in the assembled image.
+	writeMutex sync.Mutex
+}
+
+// writeJSON sends one frame while holding the connection write lock.
+func (c *RenderingClient) writeJSON(message interface{}) error {
+	c.writeMutex.Lock()
+	defer c.writeMutex.Unlock()
+	return c.Conn.WriteJSON(message)
 }
 
 func (c *RenderingClient) Initialize() {
@@ -45,7 +56,7 @@ func (c *RenderingClient) Initialize() {
 		},
 	)
 
-	go pingThread(c.Conn, c.PongChannel)
+	go c.pingThread()
 
 	c.WaitGroup.Add(2)
 
@@ -62,28 +73,29 @@ var mutex = &sync.Mutex{}
 
 var activeConn *websocket.Conn = nil
 
-func sendPing(conn *websocket.Conn) error {
-	err := conn.WriteControl(websocket.PingMessage, []byte(pingMessage), time.Now().Add(time.Hour))
-	return err
-}
-
-func pingThread(conn *websocket.Conn, pongChan <-chan bool) {
+func (c *RenderingClient) pingThread() {
+	conn := c.Conn
 	ticker := time.NewTicker(pongWait)
 	timer := time.NewTimer(pongTimeout)
+
+	writeControl := func(messageType int, data []byte) error {
+		c.writeMutex.Lock()
+		defer c.writeMutex.Unlock()
+		return conn.WriteControl(messageType, data, time.Now().Add(time.Hour))
+	}
 
 	for {
 		select {
 		case <-timer.C:
-			conn.WriteControl(websocket.CloseNoStatusReceived, []byte("No pong received"), time.Now().Add(time.Hour))
+			writeControl(websocket.CloseNoStatusReceived, []byte("No pong received"))
 			conn.Close()
 			return
 		case <-ticker.C:
-			err := sendPing(conn)
-			if err != nil {
+			if err := writeControl(websocket.PingMessage, []byte(pingMessage)); err != nil {
 				ticker.Stop()
 				return
 			}
-		case <-pongChan:
+		case <-c.PongChannel:
 			if !timer.Stop() {
 				<-timer.C
 			}
@@ -133,7 +145,9 @@ func (c *RenderingClient) ReadHandler() {
 				responseMessage.Code = messages.RenderRequestTracingAlreadyInProgress
 			}
 
-			c.Conn.WriteJSON(message)
+			// Send the rendered response, not the echoed request: the master
+			// expects the RenderResponse acknowledgement before pixel frames.
+			c.writeJSON(responseMessage)
 		}
 	}
 }
@@ -141,20 +155,24 @@ func (c *RenderingClient) ReadHandler() {
 func (c *RenderingClient) ResultSender() {
 	defer c.WaitGroup.Done()
 
-	message := messages.WebSocketMessage{
-		Type: messages.PixelResult,
-	}
-
 	for pixel := range c.Results {
-		message.OperationId = c.OperationId
 		if pixel == nil {
-			message.Type = messages.RenderingCompleted
-			c.Conn.WriteJSON(message)
+			// Terminal message carries no pixel payload; reusing the previous
+			// message struct would otherwise resend its last pixel here.
+			c.writeJSON(messages.WebSocketMessage{
+				Type:        messages.RenderingCompleted,
+				OperationId: c.OperationId,
+			})
 			break
 		}
 
-		message.Data = pixel
-		c.Conn.WriteJSON(message)
+		// Fresh struct per pixel so a later send can never mutate or leak the
+		// payload of a frame still being written to the websocket.
+		c.writeJSON(messages.WebSocketMessage{
+			Type:        messages.PixelResult,
+			Data:        pixel,
+			OperationId: c.OperationId,
+		})
 	}
 }
 

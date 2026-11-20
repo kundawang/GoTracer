@@ -1,0 +1,85 @@
+{
+  "Settings": {
+    "RenderRoutines": 4,
+    "RenderDepth": 10,
+    "Seed": 20261121
+  },
+  "Image": {
+    "OutputFile": "./out/triangleScene.png",
+    "Height": 200,
+    "Width": 400,
+    "Samples": 32,
+    "Patch": [0, 200, 0, 400]
+  },
+  "Scene": {
+    "Camera": {
+      "LookFrom": [0, 1.2, 2.5],
+      "LookAt": [0, 0.5, 0],
+      "UpVector": [0, 1, 0],
+      "FieldOfView": 50,
+      "AspectRatio": 2,
+      "Focus": 2.7,
+      "Aperture": 0
+    },
+    "AmbientLight": [0.05, 0.05, 0.1],
+    "Objects": {
+      "Spheres": [
+        {
+          "Center": [0, 0.35, 0.3],
+          "Radius": 0.35,
+          "Surface": {
+            "Type": "Lambertian",
+            "Albedo": [0.08, 0.08, 0.08]
+          }
+        },
+        {
+          "Center": [1.1, 0.3, -0.6],
+          "Radius": 0.3,
+          "Surface": {
+            "Type": "Metal",
+            "Albedo": [0.9, 0.85, 0.7],
+            "Fuzz": 0.05
+          }
+        },
+        {
+          "Center": [-1.1, 0.28, -0.4],
+          "Radius": 0.28,
+          "Surface": {
+            "Type": "Dielectric",
+            "Albedo": [1, 1, 1],
+            "RefIndex": 1.5
+          }
+        }
+      ],
+      "Triangles": [
+        {
+          "Vertices": [
+            [-12, 0, -6],
+            [12, 0, -6],
+            [0, 0, 8]
+          ],
+          "Normals": [
+            [0, 1, 0],
+            [0, 1, 0],
+            [0, 1, 0]
+          ],
+          "Surface": {
+            "Type": "Lambertian",
+            "Albedo": [0.7, 0.7, 0.7]
+          }
+        },
+        {
+          "Vertices": [
+            [-1.5, 2.4, 0.6],
+            [1.5, 2.4, 0.6],
+            [0, 2.4, -1.6]
+          ],
+          "Surface": {
+            "Type": "Light",
+            "Albedo": [12, 12, 12]
+          }
+        }
+      ]
+    }
+  }
+}

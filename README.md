@@ -105,7 +105,7 @@ func main() {
 
 
 ## Tracing Specification
-This program takes a JSON specification of environment to be traced. Currently only spheres are supported.
+This program takes a JSON specification of environment to be traced. Spheres and triangular surfaces are supported.
 ```json
 {
   "Settings": {
@@ -167,6 +167,11 @@ This program takes a JSON specification of environment to be traced. Currently o
             <td>RenderDepth</td>
             <td>integer</td>
             <td>Number of recursion for a ray after hitting an object</td>
+        </tr>
+        <tr>
+            <td>Seed</td>
+            <td>integer (optional)</td>
+            <td>Deterministic RNG seed. When set, every pixel derives its own stream from the seed and pixel coordinates, so a local render and any master/agent patch render of the same spec produce byte-identical pixels. Omit to keep the default time-seeded behaviour</td>
         </tr>
         <tr>
             <td rowspan="5">Image</td>
@@ -238,6 +243,12 @@ This program takes a JSON specification of environment to be traced. Currently o
             <td>List of spheres in world to be rendered</td>
         </tr>
         <tr>
+            <td>Objects</td>
+            <td>Triangles</td>
+            <td>List[Triangle]</td>
+            <td>List of triangles in world to be rendered</td>
+        </tr>
+        <tr>
             <td rowspan=3>Sphere</td>
             <td>Center</td>
             <td>list[float][3]</td>
@@ -252,6 +263,22 @@ This program takes a JSON specification of environment to be traced. Currently o
             <td>Surface</td>
             <td>Material</td>
             <td>Material description of Sphere</td>
+        </tr>
+        <tr>
+            <td rowspan=3>Triangle</td>
+            <td>Vertices</td>
+            <td>list[list[float][3]][3]</td>
+            <td>Exactly three [x, y, z] vertices in winding order</td>
+        </tr>
+        <tr>
+            <td>Normals</td>
+            <td>list[list[float][3]][3]</td>
+            <td>Optional. Exactly three unit vertex normals; the hit normal is barycentrically interpolated. Omit to use the geometric winding normal</td>
+        </tr>
+        <tr>
+            <td>Surface</td>
+            <td>Material</td>
+            <td>Material description of Triangle</td>
         </tr>
         <tr>
             <td rowspan="4">Material</td>
@@ -278,3 +305,18 @@ This program takes a JSON specification of environment to be traced. Currently o
 </table>
 
 **Note**: list[x][n] => list of elements of type x with size n
+
+### Triangle semantics and limits
+
+Triangles are intersected with the Moller-Trumbore algorithm and behave deterministically on every edge case:
+
+- **Hit result**: returns the distance `t`, the hit point and a unit normal. The hit interval is open (`tmin < t < tmax`), matching sphere semantics.
+- **Normals**: with `Normals` supplied the normal is barycentrically interpolated and renormalised; otherwise the geometric winding normal (`edge1 x edge2`) is used. Triangles are double sided, so the reported normal is always oriented to face the incoming ray — back faces hit with a flipped normal rather than being culled, which keeps reflection and refraction chains stable.
+- **Degenerate triangles**: collinear or repeated vertices (zero area) are rejected while building the scene, with a descriptive panic.
+- **Invalid coordinates**: `NaN`/`Infinity` vertices or normals, missing vertices, partial vertex normals and zero-length normals are rejected at scene build time. A malformed ray is reported as a clean miss.
+- **Near-parallel rays**: rays whose determinant is below a scale-relative epsilon are rejected instead of dividing to infinity.
+- **Boundary intersections**: edges and vertices are inclusive within a fixed barycentric tolerance; near-boundary coordinates snap onto the edge rather than flickering.
+- **Face count cap**: a scene may contain at most `MaxTriangles = 1000000` triangles. Each ray tests every hitable in O(n), so the cap protects renders from pathological specs; exceeding it panics.
+
+A fixed two-triangle plus sphere scene is provided in [`examples/triangleScene.json`](./examples/triangleScene.json). Run `scripts/verify_distributed.sh` to render it locally and across three master/agent workers and assert the two PNGs are byte-identical.
+
